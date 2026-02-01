@@ -3,11 +3,16 @@
 ## Goal
 Define and train a model for EndoAgent.
 
-## Datasets (public)
-List the datasets from the paper here.
+## Datasets (public, per paper)
+- Kvasir
+- CVC-300
+- CVC-ClinicDB
+- CVC-ColonDB
+- ETIS-LaribPolypDB
+- SUN-SEG
 
 ## Milestones
 - [ ] Download / prepare data
-- [ ] Train baseline
+- [ ] Train baseline (plain PyTorch)
 - [ ] Evaluate
 - [ ] Export weights
