@@ -1,0 +1,27 @@
+seed: 42
+img_size: 400
+batch_size: 16
+epochs: 20
+lr: 1.0e-4
+weight_decay: 1.0e-4
+num_workers: 4
+
+# Data
+# Point this to the extracted Kvasir root (the folder that contains class subfolders)
+data_root: "./data/kvasir-dataset-v3"
+
+# Train/val/test split ratios (per-class)
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+# Class mapping for Kvasir -> EndoAgent labels.
+# You must edit this for a 4-class setup (Adenoma, Cancer, Normal, Polyp).
+# Example 2-class mapping:
+class_map:
+  Normal: ["normal-cecum", "normal-pylorus", "normal-z-line"]
+  Polyp: ["polyps"]
+
+# Output
+output_dir: "./outputs"
