@@ -63,12 +63,28 @@ def main():
     with open(label_map_path, "w") as f:
         json.dump({"labels": labels}, f, indent=2)
 
-    tf_train = transforms.Compose([
+    aug = cfg.get("augmentation", {}) or {}
+    color = aug.get("color_jitter", {}) or {}
+    tf_train_parts = [
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ToTensor(),
-    ])
+    ]
+    if aug.get("hflip", True):
+        tf_train_parts.append(transforms.RandomHorizontalFlip())
+    if aug.get("vflip", False):
+        tf_train_parts.append(transforms.RandomVerticalFlip())
+    if aug.get("rotation_deg", 0) > 0:
+        tf_train_parts.append(transforms.RandomRotation(aug.get("rotation_deg", 0)))
+    if color:
+        tf_train_parts.append(
+            transforms.ColorJitter(
+                brightness=color.get("brightness", 0.0),
+                contrast=color.get("contrast", 0.0),
+                saturation=color.get("saturation", 0.0),
+                hue=color.get("hue", 0.0),
+            )
+        )
+    tf_train_parts.append(transforms.ToTensor())
+    tf_train = transforms.Compose(tf_train_parts)
     tf_eval = transforms.Compose([
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
         transforms.ToTensor(),
@@ -102,6 +118,10 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
 
     best_val = 0.0
+    es_cfg = cfg.get("early_stopping", {}) or {}
+    patience = int(es_cfg.get("patience", 0))
+    min_delta = float(es_cfg.get("min_delta", 0.0))
+    no_improve = 0
     output_dir = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -132,11 +152,21 @@ def main():
                 total += labels_batch.size(0)
         val_acc = correct / max(total, 1)
 
-        if val_acc > best_val:
+        if val_acc > best_val + min_delta:
             best_val = val_acc
             torch.save(model.state_dict(), output_dir / "best.pth")
+            no_improve = 0
+        else:
+            no_improve += 1
 
-        print(f"epoch={epoch+1} train_loss={running/ max(len(train_loader),1):.4f} val_acc={val_acc:.4f}")
+        print(
+            f"epoch={epoch+1} train_loss={running/ max(len(train_loader),1):.4f} "
+            f"val_acc={val_acc:.4f}"
+        )
+
+        if patience > 0 and no_improve >= patience:
+            print(f"early_stop: no improvement for {patience} epochs")
+            break
 
     torch.save(model.state_dict(), output_dir / "last.pth")
 

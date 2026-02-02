@@ -5,6 +5,19 @@ epochs: 20
 lr: 1.0e-4
 weight_decay: 1.0e-4
 num_workers: 4
+early_stopping:
+  patience: 5
+  min_delta: 0.001
+
+augmentation:
+  hflip: true
+  vflip: false
+  rotation_deg: 10
+  color_jitter:
+    brightness: 0.1
+    contrast: 0.1
+    saturation: 0.1
+    hue: 0.02
 
 # Data
 # Point this to the extracted Kvasir root (the folder that contains class subfolders)
