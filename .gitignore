@@ -4,4 +4,5 @@ __pycache__/
 .DS_Store
 
 data/
-outputs/splits/
+outputs/
+outputs_4class/
