@@ -1,0 +1,27 @@
+seed: 42
+img_size: 400
+batch_size: 16
+epochs: 20
+lr: 1.0e-4
+weight_decay: 1.0e-4
+num_workers: 4
+
+early_stopping:
+  patience: 5
+  min_delta: 0.001
+
+augmentation:
+  hflip: true
+  vflip: false
+  rotation_deg: 10
+  color_jitter:
+    brightness: 0.1
+    contrast: 0.1
+    saturation: 0.1
+    hue: 0.02
+
+# Merged 4-class dataset root
+data_root: "./data/merged_4class"
+
+# Output for weights + splits (matches prepare_ercpmp_kvasir_merge.py default)
+output_dir: "./outputs_4class"
