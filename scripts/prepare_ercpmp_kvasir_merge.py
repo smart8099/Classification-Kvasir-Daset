@@ -26,14 +26,11 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def safe_link_or_copy(src: Path, dst: Path) -> None:
+def safe_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         return
     ensure_dir(dst.parent)
-    try:
-        os.symlink(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+    shutil.copy2(src, dst)
 
 
 def extract_zip(zip_path: Path, out_dir: Path) -> None:
@@ -189,6 +186,7 @@ def main() -> None:
     parser.add_argument("--out-root", required=True)
     parser.add_argument("--split-out", default="outputs_4class/splits")
     parser.add_argument("--clean", action="store_true", help="Remove temporary _work directory after merge")
+    parser.add_argument("--only-split", action="store_true", help="Skip extraction/merge and only create splits from out-root")
     parser.add_argument("--fps", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", default="0.8,0.1,0.1")
@@ -203,64 +201,79 @@ def main() -> None:
     split_vals = [float(v.strip()) for v in args.split.split(",")]
     split_cfg = {"train": split_vals[0], "val": split_vals[1], "test": split_vals[2]}
 
-    # Extract
-    kvasir_extract = work_dir / "kvasir"
-    ercpmp_extract = work_dir / "ercpmp"
-    if not kvasir_extract.exists():
-        extract_zip(kvasir_zip, kvasir_extract)
-    if not ercpmp_extract.exists():
-        extract_rar(ercpmp_rar, ercpmp_extract)
-
-    # Prepare output folders
-    classes = ["Adenoma", "Cancer", "Normal", "Polyp"]
-    for c in classes:
-        ensure_dir(out_root / c)
-
-    # Kvasir items
-    kvasir_root = find_kvasir_root(kvasir_extract)
-    kvasir_normals = ["normal-cecum", "normal-pylorus", "normal-z-line"]
-    kvasir_polyp = ["polyps"]
     kvasir_items: List[Tuple[Path, str, str]] = []
-    for folder in kvasir_normals:
-        for img in (kvasir_root / folder).rglob("*"):
-            if img.is_file() and is_image(img):
-                dst = out_root / "Normal" / img.name
-                safe_link_or_copy(img, dst)
-                kvasir_items.append((dst, "Normal", f"kvasir_{folder}"))
-    for folder in kvasir_polyp:
-        for img in (kvasir_root / folder).rglob("*"):
-            if img.is_file() and is_image(img):
-                dst = out_root / "Polyp" / img.name
-                safe_link_or_copy(img, dst)
-                kvasir_items.append((dst, "Polyp", "kvasir_polyps"))
-
-    # ERCPMP items (images + video frames)
     ercpmp_items: List[Tuple[Path, str, str]] = []
-    frames_root = work_dir / "frames"
-    ensure_dir(frames_root)
 
-    for path in ercpmp_extract.rglob("*"):
-        if not path.is_file():
-            continue
-        label = parse_ercpmp_label(path.name)
-        if label is None:
-            continue
-        case_id = case_id_from_name(path.name)
-        if is_image(path):
-            dst = out_root / label / path.name
-            safe_link_or_copy(path, dst)
-            ercpmp_items.append((dst, label, case_id))
-        elif is_video(path):
-            case_frames_dir = frames_root / case_id
-            frames = extract_frames(path, case_frames_dir, fps=args.fps)
-            for frame in frames:
-                dst = out_root / label / frame.name
-                safe_link_or_copy(frame, dst)
+    if not args.only_split:
+        # Extract
+        kvasir_extract = work_dir / "kvasir"
+        ercpmp_extract = work_dir / "ercpmp"
+        if not kvasir_extract.exists():
+            extract_zip(kvasir_zip, kvasir_extract)
+        if not ercpmp_extract.exists():
+            extract_rar(ercpmp_rar, ercpmp_extract)
+
+        # Prepare output folders
+        classes = ["Adenoma", "Cancer", "Normal", "Polyp"]
+        for c in classes:
+            ensure_dir(out_root / c)
+
+        # Kvasir items
+        kvasir_root = find_kvasir_root(kvasir_extract)
+        kvasir_normals = ["normal-cecum", "normal-pylorus", "normal-z-line"]
+        kvasir_polyp = ["polyps"]
+        for folder in kvasir_normals:
+            for img in (kvasir_root / folder).rglob("*"):
+                if img.is_file() and is_image(img):
+                    dst = out_root / "Normal" / img.name
+                    safe_copy(img, dst)
+                    kvasir_items.append((dst, "Normal", f"kvasir_{folder}"))
+        for folder in kvasir_polyp:
+            for img in (kvasir_root / folder).rglob("*"):
+                if img.is_file() and is_image(img):
+                    dst = out_root / "Polyp" / img.name
+                    safe_copy(img, dst)
+                    kvasir_items.append((dst, "Polyp", "kvasir_polyps"))
+
+        # ERCPMP items (images + video frames)
+        frames_root = work_dir / "frames"
+        ensure_dir(frames_root)
+        for path in ercpmp_extract.rglob("*"):
+            if not path.is_file():
+                continue
+            label = parse_ercpmp_label(path.name)
+            if label is None:
+                continue
+            case_id = case_id_from_name(path.name)
+            if is_image(path):
+                dst = out_root / label / path.name
+                safe_copy(path, dst)
                 ercpmp_items.append((dst, label, case_id))
+            elif is_video(path):
+                case_frames_dir = frames_root / case_id
+                frames = extract_frames(path, case_frames_dir, fps=args.fps)
+                for frame in frames:
+                    dst = out_root / label / frame.name
+                    safe_copy(frame, dst)
+                    ercpmp_items.append((dst, label, case_id))
+    else:
+        # Only split based on existing out_root contents
+        for label_dir in out_root.iterdir():
+            if not label_dir.is_dir():
+                continue
+            label = label_dir.name
+            for img in label_dir.rglob("*"):
+                if img.is_file() and is_image(img):
+                    case_id = case_id_from_name(img.name)
+                    # Treat all non-kvasir classes as ERCPMP for case-based splitting
+                    if label == "Normal" or label == "Polyp":
+                        kvasir_items.append((img, label, f"kvasir_{label}"))
+                    else:
+                        ercpmp_items.append((img, label, case_id))
 
     # Split: ERCPMP by case, Kvasir by image
-    ercpmp_splits = split_cases(ercpmp_items, seed=args.seed, split=split_cfg)
-    kvasir_splits = split_kvasir(kvasir_items, seed=args.seed, split=split_cfg)
+    ercpmp_splits = split_cases(ercpmp_items, seed=args.seed, split=split_cfg) if ercpmp_items else {"train": [], "val": [], "test": []}
+    kvasir_splits = split_kvasir(kvasir_items, seed=args.seed, split=split_cfg) if kvasir_items else {"train": [], "val": [], "test": []}
 
     merged_splits = {k: ercpmp_splits[k] + kvasir_splits[k] for k in ["train", "val", "test"]}
     label_to_id = build_label_ids([label for _, label, _ in kvasir_items + ercpmp_items])
