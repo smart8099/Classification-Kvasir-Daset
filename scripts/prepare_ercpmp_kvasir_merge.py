@@ -26,14 +26,11 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def safe_link_or_copy(src: Path, dst: Path) -> None:
+def safe_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         return
     ensure_dir(dst.parent)
-    try:
-        os.symlink(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+    shutil.copy2(src, dst)
 
 
 def extract_zip(zip_path: Path, out_dir: Path) -> None:
@@ -225,13 +222,13 @@ def main() -> None:
         for img in (kvasir_root / folder).rglob("*"):
             if img.is_file() and is_image(img):
                 dst = out_root / "Normal" / img.name
-                safe_link_or_copy(img, dst)
+                safe_copy(img, dst)
                 kvasir_items.append((dst, "Normal", f"kvasir_{folder}"))
     for folder in kvasir_polyp:
         for img in (kvasir_root / folder).rglob("*"):
             if img.is_file() and is_image(img):
                 dst = out_root / "Polyp" / img.name
-                safe_link_or_copy(img, dst)
+                safe_copy(img, dst)
                 kvasir_items.append((dst, "Polyp", "kvasir_polyps"))
 
     # ERCPMP items (images + video frames)
@@ -248,14 +245,14 @@ def main() -> None:
         case_id = case_id_from_name(path.name)
         if is_image(path):
             dst = out_root / label / path.name
-            safe_link_or_copy(path, dst)
+            safe_copy(path, dst)
             ercpmp_items.append((dst, label, case_id))
         elif is_video(path):
             case_frames_dir = frames_root / case_id
             frames = extract_frames(path, case_frames_dir, fps=args.fps)
             for frame in frames:
                 dst = out_root / label / frame.name
-                safe_link_or_copy(frame, dst)
+                safe_copy(frame, dst)
                 ercpmp_items.append((dst, label, case_id))
 
     # Split: ERCPMP by case, Kvasir by image
