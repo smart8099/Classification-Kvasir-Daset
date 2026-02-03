@@ -31,9 +31,12 @@ def main():
     else:
         num_classes = 4
 
-    model = models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
     state = torch.load(args.weights, map_location="cpu")
+    # Infer num_classes from checkpoint
+    fc_weight = state.get("fc.weight")
+    inferred_classes = fc_weight.shape[0] if fc_weight is not None else num_classes
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, inferred_classes)
     model.load_state_dict(state)
 
     out_path = Path(args.out)
