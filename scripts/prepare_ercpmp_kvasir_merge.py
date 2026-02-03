@@ -181,8 +181,8 @@ def write_split_json(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kvasir-zip", required=True)
-    parser.add_argument("--ercpmp-rar", required=True)
+    parser.add_argument("--kvasir-zip")
+    parser.add_argument("--ercpmp-rar")
     parser.add_argument("--out-root", required=True)
     parser.add_argument("--split-out", default="outputs_4class/splits")
     parser.add_argument("--clean", action="store_true", help="Remove temporary _work directory after merge")
@@ -192,8 +192,11 @@ def main() -> None:
     parser.add_argument("--split", default="0.8,0.1,0.1")
     args = parser.parse_args()
 
-    kvasir_zip = Path(args.kvasir_zip).expanduser().resolve()
-    ercpmp_rar = Path(args.ercpmp_rar).expanduser().resolve()
+    if not args.only_split:
+        if not args.kvasir_zip or not args.ercpmp_rar:
+            raise SystemExit("--kvasir-zip and --ercpmp-rar are required unless --only-split is set")
+        kvasir_zip = Path(args.kvasir_zip).expanduser().resolve()
+        ercpmp_rar = Path(args.ercpmp_rar).expanduser().resolve()
     out_root = Path(args.out_root).expanduser().resolve()
     work_dir = out_root / "_work"
     ensure_dir(work_dir)
