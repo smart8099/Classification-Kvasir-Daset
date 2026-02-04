@@ -25,3 +25,9 @@ data_root: "./data/merged_4class"
 
 # Output for weights + splits (matches prepare_ercpmp_kvasir_merge.py default)
 output_dir: "./outputs_4class"
+
+# Train/val/test split ratios (per-class)
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
