@@ -20,6 +20,11 @@ augmentation:
     saturation: 0.1
     hue: 0.02
 
+normalization:
+  enabled: true
+  # If not set, defaults to ${output_dir}/normalize.json
+  stats_path:
+
 # Merged 4-class dataset root
 data_root: "./data/merged_4class"
 

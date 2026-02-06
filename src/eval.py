@@ -39,10 +39,30 @@ def main():
     with open(labels_path, "r") as f:
         labels = json.load(f)["labels"]
 
-    tf_eval = transforms.Compose([
+    norm_cfg = cfg.get("normalization", {}) or {}
+    norm_enabled = bool(norm_cfg.get("enabled", False))
+    stats_path = Path(
+        norm_cfg.get("stats_path") or (Path(cfg["output_dir"]) / "normalize.json")
+    )
+    norm_mean = None
+    norm_std = None
+    if norm_enabled:
+        if not stats_path.exists():
+            raise FileNotFoundError(
+                f"normalization enabled but stats not found: {stats_path}"
+            )
+        with open(stats_path, "r") as f:
+            stats = json.load(f)
+        norm_mean = stats["mean"]
+        norm_std = stats["std"]
+
+    tf_eval_parts = [
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
         transforms.ToTensor(),
-    ])
+    ]
+    if norm_enabled:
+        tf_eval_parts.append(transforms.Normalize(mean=norm_mean, std=norm_std))
+    tf_eval = transforms.Compose(tf_eval_parts)
 
     test_ds = ImageFolderList(test_items, transform=tf_eval)
     test_loader = DataLoader(

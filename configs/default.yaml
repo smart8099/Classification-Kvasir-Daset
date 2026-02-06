@@ -19,6 +19,11 @@ augmentation:
     saturation: 0.1
     hue: 0.02
 
+normalization:
+  enabled: true
+  # If not set, defaults to ${output_dir}/normalize.json
+  stats_path:
+
 # Data
 # Point this to the extracted Kvasir root (the folder that contains class subfolders)
 data_root: "./data/kvasir-dataset-v3"

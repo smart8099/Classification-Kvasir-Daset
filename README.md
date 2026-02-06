@@ -26,6 +26,12 @@ class_map:
 python3 src/train.py --config configs/default.yaml
 ```
 
+## Normalization (recommended)
+Compute dataset mean/std on the train split (saves to `output_dir/normalize.json`):
+```bash
+python3 scripts/compute_norm.py --config configs/default.yaml
+```
+
 ## 4-class merge (ERCPMP + Kvasir)
 Prepare a merged dataset with videos + images and case-level splits:
 ```bash

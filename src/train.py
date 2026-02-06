@@ -32,6 +32,36 @@ def load_split(output_dir: Path):
             return json.load(f)
     return _load("train"), _load("val"), _load("test")
 
+def compute_channel_stats(items, img_size: int, batch_size: int, num_workers: int):
+    tf_stats = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+    ])
+    ds = ImageFolderList(items, transform=tf_stats)
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    channel_sum = torch.zeros(3, dtype=torch.double)
+    channel_sum_sq = torch.zeros(3, dtype=torch.double)
+    num_pixels = 0
+    for images, _ in loader:
+        images = images.double()
+        b, c, h, w = images.shape
+        if c != 3:
+            raise ValueError(f"expected 3 channels, got {c}")
+        num_pixels += b * h * w
+        channel_sum += images.sum(dim=[0, 2, 3])
+        channel_sum_sq += (images ** 2).sum(dim=[0, 2, 3])
+    if num_pixels == 0:
+        raise ValueError("no pixels found while computing normalization stats")
+    mean = channel_sum / num_pixels
+    std = torch.sqrt(channel_sum_sq / num_pixels - mean ** 2)
+    return mean.tolist(), std.tolist()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -63,6 +93,31 @@ def main():
     with open(label_map_path, "w") as f:
         json.dump({"labels": labels}, f, indent=2)
 
+    norm_cfg = cfg.get("normalization", {}) or {}
+    norm_enabled = bool(norm_cfg.get("enabled", False))
+    stats_path = Path(
+        norm_cfg.get("stats_path") or (Path(cfg["output_dir"]) / "normalize.json")
+    )
+    norm_mean = None
+    norm_std = None
+    if norm_enabled:
+        if stats_path.exists():
+            with open(stats_path, "r") as f:
+                stats = json.load(f)
+            norm_mean = stats["mean"]
+            norm_std = stats["std"]
+        else:
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            norm_mean, norm_std = compute_channel_stats(
+                train_items,
+                img_size=cfg["img_size"],
+                batch_size=cfg["batch_size"],
+                num_workers=cfg["num_workers"],
+            )
+            with open(stats_path, "w") as f:
+                json.dump({"mean": norm_mean, "std": norm_std}, f, indent=2)
+            print(f"saved normalization stats: {stats_path}")
+
     aug = cfg.get("augmentation", {}) or {}
     color = aug.get("color_jitter", {}) or {}
     tf_train_parts = [
@@ -84,11 +139,16 @@ def main():
             )
         )
     tf_train_parts.append(transforms.ToTensor())
+    if norm_enabled:
+        tf_train_parts.append(transforms.Normalize(mean=norm_mean, std=norm_std))
     tf_train = transforms.Compose(tf_train_parts)
-    tf_eval = transforms.Compose([
+    tf_eval_parts = [
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
         transforms.ToTensor(),
-    ])
+    ]
+    if norm_enabled:
+        tf_eval_parts.append(transforms.Normalize(mean=norm_mean, std=norm_std))
+    tf_eval = transforms.Compose(tf_eval_parts)
 
     train_ds = ImageFolderList(train_items, transform=tf_train)
     val_ds = ImageFolderList(val_items, transform=tf_eval)
