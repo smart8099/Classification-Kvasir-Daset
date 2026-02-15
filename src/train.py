@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from torchvision import models, transforms
 import yaml
 
+from collections import Counter
+
 from data import build_class_map, index_images, stratified_split, ImageFolderList
 
 
@@ -79,12 +81,12 @@ def main():
     indexed = index_images(class_dirs)
 
     split_dir = Path(cfg["output_dir"]) / "splits"
-    if (split_dir / "train.json").exists():
-        train_items, val_items, test_items = load_split(split_dir)
-    else:
-        split = stratified_split(indexed, seed=seed, split=cfg["split"])
-        save_split(split_dir, split)
-        train_items, val_items, test_items = split.train, split.val, split.test
+    # Always regenerate splits with case-aware logic
+    for old in split_dir.glob("*.json"):
+        old.unlink()
+    split = stratified_split(indexed, seed=seed, split=cfg["split"])
+    save_split(split_dir, split)
+    train_items, val_items, test_items = split.train, split.val, split.test
 
     labels = sorted(class_dirs.keys())
     num_classes = len(labels)
@@ -170,11 +172,19 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = models.resnet18(weights=None)
+    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     model = model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    # Class-weighted loss to handle severe imbalance (e.g. Cancer)
+    label_counts = Counter(label for _, label in train_items)
+    total_train = len(train_items)
+    class_weights = torch.tensor(
+        [total_train / max(label_counts.get(i, 1), 1) for i in range(num_classes)],
+        dtype=torch.float32,
+    ).to(device)
+    class_weights = class_weights / class_weights.sum() * num_classes  # normalise
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
 
     best_val = 0.0
@@ -202,15 +212,19 @@ def main():
         model.eval()
         correct = 0
         total = 0
+        val_running_loss = 0.0
         with torch.no_grad():
             for images, labels_batch in val_loader:
                 images = images.to(device)
                 labels_batch = labels_batch.to(device)
                 outputs = model(images)
+                val_loss = criterion(outputs, labels_batch)
+                val_running_loss += val_loss.item()
                 preds = outputs.argmax(dim=1)
                 correct += (preds == labels_batch).sum().item()
                 total += labels_batch.size(0)
         val_acc = correct / max(total, 1)
+        avg_val_loss = val_running_loss / max(len(val_loader), 1)
 
         if val_acc > best_val + min_delta:
             best_val = val_acc
@@ -221,7 +235,7 @@ def main():
 
         print(
             f"epoch={epoch+1} train_loss={running/ max(len(train_loader),1):.4f} "
-            f"val_acc={val_acc:.4f}"
+            f"val_loss={avg_val_loss:.4f} val_acc={val_acc:.4f}"
         )
 
         if patience > 0 and no_improve >= patience:

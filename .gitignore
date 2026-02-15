@@ -7,4 +7,5 @@ __pycache__/
 data/
 outputs/
 outputs_4class/
+outputs_3class/
 AGENTS.md

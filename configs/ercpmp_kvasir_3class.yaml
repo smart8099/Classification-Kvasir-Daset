@@ -1,0 +1,38 @@
+seed: 42
+img_size: 400
+batch_size: 16
+epochs: 20
+lr: 1.0e-4
+weight_decay: 1.0e-4
+num_workers: 4
+
+early_stopping:
+  patience: 5
+  min_delta: 0.001
+
+augmentation:
+  hflip: true
+  vflip: false
+  rotation_deg: 10
+  color_jitter:
+    brightness: 0.1
+    contrast: 0.1
+    saturation: 0.1
+    hue: 0.02
+
+normalization:
+  enabled: true
+  # If not set, defaults to ${output_dir}/normalize.json
+  stats_path:
+
+# Merged 3-class dataset (Cancer folded into Adenoma)
+data_root: "./data/merged_3class"
+
+# Output for weights + splits
+output_dir: "./outputs_3class"
+
+# Train/val/test split ratios (per-class)
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1

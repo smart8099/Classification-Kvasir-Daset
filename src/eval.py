@@ -8,6 +8,13 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassConfusionMatrix,
+    MulticlassF1Score,
+    MulticlassPrecision,
+    MulticlassRecall,
+)
 import yaml
 
 from data import ImageFolderList
@@ -74,25 +81,68 @@ def main():
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, len(labels))
+    num_classes = len(labels)
+
+    model = models.resnet18(weights=None)  # architecture only; weights loaded below
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
     model.load_state_dict(torch.load(args.weights, map_location=device))
     model = model.to(device)
     model.eval()
 
-    correct = 0
-    total = 0
+    # --- torchmetrics collectors ---
+    conf_mat = MulticlassConfusionMatrix(num_classes=num_classes).to(device)
+    precision_metric = MulticlassPrecision(num_classes=num_classes, average=None).to(device)
+    recall_metric = MulticlassRecall(num_classes=num_classes, average=None).to(device)
+    f1_metric = MulticlassF1Score(num_classes=num_classes, average=None).to(device)
+    acc_metric = MulticlassAccuracy(num_classes=num_classes, average="micro").to(device)
+
+    macro_precision = MulticlassPrecision(num_classes=num_classes, average="macro").to(device)
+    macro_recall = MulticlassRecall(num_classes=num_classes, average="macro").to(device)
+    macro_f1 = MulticlassF1Score(num_classes=num_classes, average="macro").to(device)
+
     with torch.no_grad():
         for images, labels_batch in test_loader:
             images = images.to(device)
             labels_batch = labels_batch.to(device)
-            outputs = model(images)
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels_batch).sum().item()
-            total += labels_batch.size(0)
+            preds = model(images).argmax(dim=1)
 
-    acc = correct / max(total, 1)
-    print(f"test_acc={acc:.4f}")
+            conf_mat.update(preds, labels_batch)
+            precision_metric.update(preds, labels_batch)
+            recall_metric.update(preds, labels_batch)
+            f1_metric.update(preds, labels_batch)
+            acc_metric.update(preds, labels_batch)
+            macro_precision.update(preds, labels_batch)
+            macro_recall.update(preds, labels_batch)
+            macro_f1.update(preds, labels_batch)
+
+    # --- Print results ---
+    cm = conf_mat.compute().cpu()
+    prec = precision_metric.compute().cpu()
+    rec = recall_metric.compute().cpu()
+    f1 = f1_metric.compute().cpu()
+    acc = acc_metric.compute().item()
+
+    header = "".ljust(16) + "".join(l[:12].ljust(14) for l in labels)
+    print("\n=== Confusion Matrix (rows=true, cols=predicted) ===")
+    print(header)
+    for i, label in enumerate(labels):
+        row = label[:14].ljust(16) + "".join(str(int(cm[i, j].item())).ljust(14) for j in range(num_classes))
+        print(row)
+
+    print("\n=== Per-Class Metrics ===")
+    print(f"{'Class':<16} {'Precision':>10} {'Recall':>10} {'F1':>10} {'Support':>10}")
+    print("-" * 58)
+    for i, label in enumerate(labels):
+        support = int(cm[i, :].sum().item())
+        print(f"{label:<16} {prec[i].item():>10.4f} {rec[i].item():>10.4f} {f1[i].item():>10.4f} {support:>10d}")
+
+    mp = macro_precision.compute().item()
+    mr = macro_recall.compute().item()
+    mf = macro_f1.compute().item()
+    total = int(cm.sum().item())
+    print("-" * 58)
+    print(f"{'Macro Avg':<16} {mp:>10.4f} {mr:>10.4f} {mf:>10.4f} {total:>10d}")
+    print(f"\nOverall test_acc={acc:.4f}  ({int(acc * total)}/{total})")
 
 
 if __name__ == "__main__":

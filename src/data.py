@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import random
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -67,7 +69,14 @@ def index_images(class_dirs: Dict[str, List[Path]]) -> Dict[str, List[Path]]:
     return indexed
 
 
+def _case_id(path: Path) -> str:
+    """Extract case ID from filename: numeric prefix for ERCPMP, full stem for Kvasir UUIDs."""
+    m = re.match(r"(\d+)", path.name)
+    return m.group(1) if m else path.stem
+
+
 def stratified_split(indexed: Dict[str, List[Path]], seed: int, split: Dict[str, float]) -> SplitFiles:
+    """Case-aware stratified split: all images from the same case stay in one split."""
     rng = random.Random(seed)
     train: List[Tuple[str, int]] = []
     val: List[Tuple[str, int]] = []
@@ -77,21 +86,32 @@ def stratified_split(indexed: Dict[str, List[Path]], seed: int, split: Dict[str,
     label_to_id = {label: i for i, label in enumerate(labels)}
 
     for label in labels:
-        files = indexed[label][:]
-        rng.shuffle(files)
+        # Group files by case
+        cases: Dict[str, List[Path]] = defaultdict(list)
+        for p in indexed[label]:
+            cases[_case_id(p)].append(p)
 
-        n = len(files)
-        n_train = int(n * split["train"])
-        n_val = int(n * split["val"])
-        n_test = n - n_train - n_val
+        case_ids = list(cases.keys())
+        rng.shuffle(case_ids)
+
+        n = len(case_ids)
+        n_train = max(1, int(n * split["train"]))
+        n_val = max(1, int(n * split["val"])) if n > 2 else 0
+        # Ensure we don't exceed total
+        if n_train + n_val >= n:
+            n_val = max(0, n - n_train - 1)
+
+        train_ids = case_ids[:n_train]
+        val_ids = case_ids[n_train:n_train + n_val]
+        test_ids = case_ids[n_train + n_val:]
 
         label_id = label_to_id[label]
-        train.extend([(str(p), label_id) for p in files[:n_train]])
-        val.extend([(str(p), label_id) for p in files[n_train:n_train + n_val]])
-        test.extend([(str(p), label_id) for p in files[n_train + n_val:]])
-
-        if n_test < 0:
-            raise ValueError(f"Invalid split ratios for class {label}")
+        for cid in train_ids:
+            train.extend([(str(p), label_id) for p in cases[cid]])
+        for cid in val_ids:
+            val.extend([(str(p), label_id) for p in cases[cid]])
+        for cid in test_ids:
+            test.extend([(str(p), label_id) for p in cases[cid]])
 
     rng.shuffle(train)
     rng.shuffle(val)
