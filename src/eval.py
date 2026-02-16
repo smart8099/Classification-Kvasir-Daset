@@ -95,6 +95,21 @@ def tune_per_class_thresholds(logits: torch.Tensor, labels: torch.Tensor):
     return best_thresholds
 
 
+def tune_global_threshold_for_micro_f1(logits: torch.Tensor, labels: torch.Tensor):
+    probs = torch.sigmoid(logits)
+    candidates = torch.linspace(0.1, 0.9, steps=17)
+    best_f1 = -1.0
+    best_t = 0.5
+    for t in candidates:
+        preds = (probs >= t).float()
+        tp, fp, fn = multilabel_counts_from_preds(preds, labels)
+        f1_micro = multilabel_metrics_from_counts(tp, fp, fn)["micro_f1"]
+        if f1_micro > best_f1:
+            best_f1 = f1_micro
+            best_t = float(t.item())
+    return best_t
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
@@ -102,8 +117,14 @@ def main():
     parser.add_argument(
         "--tune-thresholds",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="For multilabel: tune per-class thresholds on val split before test evaluation.",
+        default=False,
+        help="For multilabel: tune thresholds on val split before test evaluation.",
+    )
+    parser.add_argument(
+        "--tune-mode",
+        choices=["global_micro", "per_class"],
+        default="global_micro",
+        help="Threshold tuning mode when --tune-thresholds is enabled.",
     )
     args = parser.parse_args()
 
@@ -189,10 +210,15 @@ def main():
             )
             val_logits, val_labels = collect_logits_labels(model, val_loader, device)
             if val_logits.numel() > 0 and val_logits.shape[1] == num_classes:
-                thresholds = tune_per_class_thresholds(val_logits, val_labels)
-                print("thresholds_tuned_on=val")
-                for i, name in enumerate(labels):
-                    print(f"  {name}: {thresholds[i].item():.2f}")
+                if args.tune_mode == "per_class":
+                    thresholds = tune_per_class_thresholds(val_logits, val_labels)
+                    print("thresholds_tuned_on=val mode=per_class")
+                    for i, name in enumerate(labels):
+                        print(f"  {name}: {thresholds[i].item():.2f}")
+                else:
+                    best_t = tune_global_threshold_for_micro_f1(val_logits, val_labels)
+                    thresholds = torch.full((num_classes,), best_t, dtype=torch.float32)
+                    print(f"thresholds_tuned_on=val mode=global_micro threshold={best_t:.2f}")
                 if not has_test_split:
                     print("warning: tuned and evaluated on val (test split is empty)")
             else:
