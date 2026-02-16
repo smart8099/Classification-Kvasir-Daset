@@ -10,13 +10,6 @@ task_type: multilabel
 multilabel:
   threshold: 0.5
 
-imbalance:
-  sampler:
-    enabled: false
-    replacement: true
-    # >1.0 oversamples minority classes more aggressively.
-    exponent: 1.0
-
 early_stopping:
   patience: 5
   min_delta: 0.001

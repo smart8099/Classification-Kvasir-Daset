@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from torchvision import models, transforms
 import yaml
 
@@ -71,42 +71,6 @@ def ensure_labels_file(output_dir: Path, labels):
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     with open(labels_path, "w") as f:
         json.dump({"labels": labels}, f, indent=2)
-
-
-def build_multiclass_sample_weights(train_items, num_classes: int, exponent: float = 1.0):
-    label_counts = Counter(label for _, label in train_items)
-    total = max(len(train_items), 1)
-    class_weights = torch.tensor(
-        [(total / max(label_counts.get(i, 1), 1)) ** exponent for i in range(num_classes)],
-        dtype=torch.double,
-    )
-    return torch.tensor([class_weights[label].item() for _, label in train_items], dtype=torch.double)
-
-
-def build_multilabel_sample_weights(train_items, num_classes: int, exponent: float = 1.0):
-    pos_counts = torch.zeros(num_classes, dtype=torch.float64)
-    all_zero_count = 0
-    labels_list = []
-    for item in train_items:
-        y = item["labels"] if isinstance(item, dict) else item[1]
-        y_t = torch.tensor(y, dtype=torch.float64)
-        labels_list.append(y_t)
-        pos_counts += y_t
-        if y_t.sum().item() == 0.0:
-            all_zero_count += 1
-
-    total = max(len(train_items), 1)
-    inv_pos = (total / torch.clamp(pos_counts, min=1.0)) ** exponent
-    inv_all_zero = float((total / max(all_zero_count, 1)) ** exponent)
-
-    sample_weights = []
-    for y_t in labels_list:
-        pos_idx = y_t > 0.0
-        if pos_idx.any():
-            sample_weights.append(inv_pos[pos_idx].mean().item())
-        else:
-            sample_weights.append(inv_all_zero)
-    return torch.tensor(sample_weights, dtype=torch.double)
 
 
 def main():
@@ -243,6 +207,13 @@ def main():
         train_ds = MultiLabelImageList(train_items, transform=tf_train)
         val_ds = MultiLabelImageList(val_items, transform=tf_eval)
 
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg["batch_size"],
+        shuffle=True,
+        num_workers=cfg["num_workers"],
+        pin_memory=True,
+    )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg["batch_size"],
@@ -275,63 +246,7 @@ def main():
         n = max(float(len(train_items)), 1.0)
         neg_counts = n - pos_counts
         pos_weight = neg_counts / torch.clamp(pos_counts, min=1.0)
-        ml_cfg = cfg.get("multilabel", {}) or {}
-        pos_weight_power = float(ml_cfg.get("pos_weight_power", 1.0))
-        pos_weight_min = float(ml_cfg.get("pos_weight_min", 1.0))
-        pos_weight_max = ml_cfg.get("pos_weight_max", None)
-        if pos_weight_power != 1.0:
-            pos_weight = torch.pow(pos_weight, pos_weight_power)
-        if pos_weight_max is None:
-            pos_weight = torch.clamp(pos_weight, min=pos_weight_min)
-        else:
-            pos_weight = torch.clamp(pos_weight, min=pos_weight_min, max=float(pos_weight_max))
-        print(
-            "pos_weight_stats "
-            f"min={pos_weight.min().item():.4f} "
-            f"median={pos_weight.median().item():.4f} "
-            f"max={pos_weight.max().item():.4f}"
-        )
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
-
-    imb_cfg = cfg.get("imbalance", {}) or {}
-    sampler_cfg = imb_cfg.get("sampler", {}) or {}
-    sampler_enabled = bool(sampler_cfg.get("enabled", False))
-    sampler_replacement = bool(sampler_cfg.get("replacement", True))
-    sampler_exponent = float(sampler_cfg.get("exponent", 1.0))
-    train_sampler = None
-    if sampler_enabled:
-        if task_type == "multiclass":
-            sample_weights = build_multiclass_sample_weights(
-                train_items,
-                num_classes=num_classes,
-                exponent=sampler_exponent,
-            )
-        else:
-            sample_weights = build_multilabel_sample_weights(
-                train_items,
-                num_classes=num_classes,
-                exponent=sampler_exponent,
-            )
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=sampler_replacement,
-        )
-        print(
-            "weighted_sampler enabled "
-            f"replacement={sampler_replacement} exponent={sampler_exponent} "
-            f"w_min={sample_weights.min().item():.4f} "
-            f"w_max={sample_weights.max().item():.4f}"
-        )
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg["batch_size"],
-        shuffle=train_sampler is None,
-        sampler=train_sampler,
-        num_workers=cfg["num_workers"],
-        pin_memory=True,
-    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched_cfg = cfg.get("scheduler", {}) or {}
