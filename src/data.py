@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from PIL import Image
+import torch
 
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -134,3 +135,25 @@ class ImageFolderList:
         if self.transform is not None:
             image = self.transform(image)
         return image, label
+
+
+class MultiLabelImageList:
+    def __init__(self, items, transform=None):
+        self.items = items
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int):
+        item = self.items[idx]
+        if isinstance(item, dict):
+            path = item["path"]
+            labels = item["labels"]
+        else:
+            path, labels = item
+        image = Image.open(path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        target = torch.tensor(labels, dtype=torch.float32)
+        return image, target

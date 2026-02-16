@@ -9,3 +9,8 @@ outputs/
 outputs_4class/
 outputs_3class/
 AGENTS.md
+SYNAPSE_SLICING_OVERVIEW.md
+outputs_synapse_all_organs/
+outputs_synapse/
+outputs_synapse_all_organs_multilabel/
+outputs_synapse_multilabel_dryrun/

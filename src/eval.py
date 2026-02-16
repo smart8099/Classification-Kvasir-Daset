@@ -8,16 +8,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
-from torchmetrics.classification import (
-    MulticlassAccuracy,
-    MulticlassConfusionMatrix,
-    MulticlassF1Score,
-    MulticlassPrecision,
-    MulticlassRecall,
-)
 import yaml
 
-from data import ImageFolderList
+from data import ImageFolderList, MultiLabelImageList
 
 
 def load_config(path: Path) -> dict:
@@ -29,6 +22,7 @@ def load_split(output_dir: Path):
     def _load(name: str):
         with open(output_dir / f"{name}.json", "r") as f:
             return json.load(f)
+
     return _load("train"), _load("val"), _load("test")
 
 
@@ -39,39 +33,41 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
-    output_dir = Path(cfg["output_dir"]) / "splits"
-    _, _, test_items = load_split(output_dir)
+    task_type = (cfg.get("task_type", "multiclass") or "multiclass").strip().lower()
+
+    split_dir = Path(cfg["output_dir"]) / "splits"
+    _, val_items, test_items = load_split(split_dir)
+    if len(test_items) == 0:
+        print("warning: test split is empty; evaluating on val split instead")
+        test_items = val_items
 
     labels_path = Path(cfg["output_dir"]) / "labels.json"
+    if not labels_path.exists():
+        raise FileNotFoundError(f"missing labels file: {labels_path}")
     with open(labels_path, "r") as f:
         labels = json.load(f)["labels"]
 
     norm_cfg = cfg.get("normalization", {}) or {}
     norm_enabled = bool(norm_cfg.get("enabled", False))
-    stats_path = Path(
-        norm_cfg.get("stats_path") or (Path(cfg["output_dir"]) / "normalize.json")
-    )
-    norm_mean = None
-    norm_std = None
-    if norm_enabled:
-        if not stats_path.exists():
-            raise FileNotFoundError(
-                f"normalization enabled but stats not found: {stats_path}"
-            )
-        with open(stats_path, "r") as f:
-            stats = json.load(f)
-        norm_mean = stats["mean"]
-        norm_std = stats["std"]
+    stats_path = Path(norm_cfg.get("stats_path") or (Path(cfg["output_dir"]) / "normalize.json"))
 
     tf_eval_parts = [
         transforms.Resize((cfg["img_size"], cfg["img_size"])),
         transforms.ToTensor(),
     ]
     if norm_enabled:
-        tf_eval_parts.append(transforms.Normalize(mean=norm_mean, std=norm_std))
+        if not stats_path.exists():
+            raise FileNotFoundError(f"normalization enabled but stats not found: {stats_path}")
+        with open(stats_path, "r") as f:
+            stats = json.load(f)
+        tf_eval_parts.append(transforms.Normalize(mean=stats["mean"], std=stats["std"]))
     tf_eval = transforms.Compose(tf_eval_parts)
 
-    test_ds = ImageFolderList(test_items, transform=tf_eval)
+    if task_type == "multiclass":
+        test_ds = ImageFolderList(test_items, transform=tf_eval)
+    else:
+        test_ds = MultiLabelImageList(test_items, transform=tf_eval)
+
     test_loader = DataLoader(
         test_ds,
         batch_size=cfg["batch_size"],
@@ -83,66 +79,65 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_classes = len(labels)
 
-    model = models.resnet18(weights=None)  # architecture only; weights loaded below
+    model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     model.load_state_dict(torch.load(args.weights, map_location=device))
     model = model.to(device)
     model.eval()
 
-    # --- torchmetrics collectors ---
-    conf_mat = MulticlassConfusionMatrix(num_classes=num_classes).to(device)
-    precision_metric = MulticlassPrecision(num_classes=num_classes, average=None).to(device)
-    recall_metric = MulticlassRecall(num_classes=num_classes, average=None).to(device)
-    f1_metric = MulticlassF1Score(num_classes=num_classes, average=None).to(device)
-    acc_metric = MulticlassAccuracy(num_classes=num_classes, average="micro").to(device)
+    if task_type == "multiclass":
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels_batch in test_loader:
+                images = images.to(device)
+                labels_batch = labels_batch.to(device)
+                preds = model(images).argmax(dim=1)
+                correct += (preds == labels_batch).sum().item()
+                total += labels_batch.size(0)
+        acc = correct / max(total, 1)
+        print(f"test_acc={acc:.4f}")
+    else:
+        ml_cfg = cfg.get("multilabel", {}) or {}
+        threshold = float(ml_cfg.get("threshold", 0.5))
 
-    macro_precision = MulticlassPrecision(num_classes=num_classes, average="macro").to(device)
-    macro_recall = MulticlassRecall(num_classes=num_classes, average="macro").to(device)
-    macro_f1 = MulticlassF1Score(num_classes=num_classes, average="macro").to(device)
+        tp = torch.zeros(num_classes, dtype=torch.float64)
+        fp = torch.zeros(num_classes, dtype=torch.float64)
+        fn = torch.zeros(num_classes, dtype=torch.float64)
 
-    with torch.no_grad():
-        for images, labels_batch in test_loader:
-            images = images.to(device)
-            labels_batch = labels_batch.to(device)
-            preds = model(images).argmax(dim=1)
+        with torch.no_grad():
+            for images, labels_batch in test_loader:
+                images = images.to(device)
+                labels_batch = labels_batch.to(device).float()
+                logits = model(images)
+                preds = (torch.sigmoid(logits) >= threshold).float()
 
-            conf_mat.update(preds, labels_batch)
-            precision_metric.update(preds, labels_batch)
-            recall_metric.update(preds, labels_batch)
-            f1_metric.update(preds, labels_batch)
-            acc_metric.update(preds, labels_batch)
-            macro_precision.update(preds, labels_batch)
-            macro_recall.update(preds, labels_batch)
-            macro_f1.update(preds, labels_batch)
+                tp += (preds * labels_batch).sum(dim=0).cpu().double()
+                fp += (preds * (1.0 - labels_batch)).sum(dim=0).cpu().double()
+                fn += ((1.0 - preds) * labels_batch).sum(dim=0).cpu().double()
 
-    # --- Print results ---
-    cm = conf_mat.compute().cpu()
-    prec = precision_metric.compute().cpu()
-    rec = recall_metric.compute().cpu()
-    f1 = f1_metric.compute().cpu()
-    acc = acc_metric.compute().item()
+        precision = tp / torch.clamp(tp + fp, min=1e-8)
+        recall = tp / torch.clamp(tp + fn, min=1e-8)
+        f1 = 2.0 * precision * recall / torch.clamp(precision + recall, min=1e-8)
 
-    header = "".ljust(16) + "".join(l[:12].ljust(14) for l in labels)
-    print("\n=== Confusion Matrix (rows=true, cols=predicted) ===")
-    print(header)
-    for i, label in enumerate(labels):
-        row = label[:14].ljust(16) + "".join(str(int(cm[i, j].item())).ljust(14) for j in range(num_classes))
-        print(row)
+        tp_micro = tp.sum().item()
+        fp_micro = fp.sum().item()
+        fn_micro = fn.sum().item()
+        p_micro = tp_micro / max(tp_micro + fp_micro, 1e-8)
+        r_micro = tp_micro / max(tp_micro + fn_micro, 1e-8)
+        f1_micro = (2.0 * p_micro * r_micro) / max(p_micro + r_micro, 1e-8)
 
-    print("\n=== Per-Class Metrics ===")
-    print(f"{'Class':<16} {'Precision':>10} {'Recall':>10} {'F1':>10} {'Support':>10}")
-    print("-" * 58)
-    for i, label in enumerate(labels):
-        support = int(cm[i, :].sum().item())
-        print(f"{label:<16} {prec[i].item():>10.4f} {rec[i].item():>10.4f} {f1[i].item():>10.4f} {support:>10d}")
+        p_macro = precision.mean().item()
+        r_macro = recall.mean().item()
+        f1_macro = f1.mean().item()
 
-    mp = macro_precision.compute().item()
-    mr = macro_recall.compute().item()
-    mf = macro_f1.compute().item()
-    total = int(cm.sum().item())
-    print("-" * 58)
-    print(f"{'Macro Avg':<16} {mp:>10.4f} {mr:>10.4f} {mf:>10.4f} {total:>10d}")
-    print(f"\nOverall test_acc={acc:.4f}  ({int(acc * total)}/{total})")
+        print(f"test_micro_f1={f1_micro:.4f}")
+        print(f"test_macro_f1={f1_macro:.4f}")
+        print(f"test_macro_precision={p_macro:.4f}")
+        print(f"test_macro_recall={r_macro:.4f}")
+        print("per_class_f1:")
+        for i, name in enumerate(labels):
+            print(f"  {name}: {f1[i].item():.4f}")
 
 
 if __name__ == "__main__":
