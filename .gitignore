@@ -14,3 +14,7 @@ outputs_synapse_all_organs/
 outputs_synapse/
 outputs_synapse_all_organs_multilabel/
 outputs_synapse_multilabel_dryrun/
+outputs_synapse_multilabel_dryrun_4class/
+other_data/
+outputs_synapse_debug_check/
+outputs_synapse_skipped_check/

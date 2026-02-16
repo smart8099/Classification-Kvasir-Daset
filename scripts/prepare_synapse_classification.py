@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 
 import nibabel as nib
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 GROUPED_CLASS_MAP: Dict[str, List[int]] = {
@@ -132,6 +132,108 @@ def classes_present_for_slice(mask2d: np.ndarray, id_to_class: Dict[int, str], m
     present = [k for k, v in per_class.items() if v >= min_pixels]
     present.sort()
     return present
+
+
+def per_class_pixel_counts(mask2d: np.ndarray, id_to_class: Dict[int, str]) -> Counter[str]:
+    """Count mapped foreground pixels per class in a slice."""
+    labels, counts = np.unique(mask2d, return_counts=True)
+    per_class: Counter[str] = Counter()
+    for organ_id, count in zip(labels.tolist(), counts.tolist()):
+        if organ_id == 0:
+            continue
+        class_name = id_to_class.get(int(organ_id))
+        if class_name is None:
+            continue
+        per_class[class_name] += int(count)
+    return per_class
+
+
+def mask_to_color(mask2d: np.ndarray) -> np.ndarray:
+    """Render integer label mask to an RGB array for quick visual debugging."""
+    h, w = mask2d.shape
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    # Fixed palette (index by label id mod len)
+    palette = np.array(
+        [
+            [0, 0, 0],
+            [255, 99, 71],
+            [60, 179, 113],
+            [30, 144, 255],
+            [255, 215, 0],
+            [186, 85, 211],
+            [0, 206, 209],
+            [255, 140, 0],
+            [100, 149, 237],
+            [220, 20, 60],
+            [154, 205, 50],
+            [255, 105, 180],
+            [0, 191, 255],
+            [238, 130, 238],
+        ],
+        dtype=np.uint8,
+    )
+    labels = np.unique(mask2d)
+    for lab in labels:
+        if lab <= 0:
+            continue
+        color = palette[int(lab) % len(palette)]
+        out[mask2d == lab] = color
+    return out
+
+
+def save_skipped_debug_panel(
+    out_path: Path,
+    img_u8: np.ndarray,
+    mask2d: np.ndarray,
+    case_id: str,
+    axis: str,
+    slice_idx: int,
+    reason: str,
+    threshold_name: str,
+    threshold_value: int,
+    foreground_pixels: int,
+    per_class: Counter[str],
+    overlay_alpha: float,
+) -> None:
+    """Save a side-by-side panel (image, mask, overlay) with text stats."""
+    img_rgb = np.stack([img_u8, img_u8, img_u8], axis=-1).astype(np.uint8)
+    mask_rgb = mask_to_color(mask2d)
+    mask_present = (mask2d > 0)[..., None]
+    overlay = img_rgb.copy().astype(np.float32)
+    overlay[mask_present[:, :, 0]] = (
+        (1.0 - overlay_alpha) * overlay[mask_present[:, :, 0]]
+        + overlay_alpha * mask_rgb[mask_present[:, :, 0]]
+    )
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+
+    h, w = img_u8.shape
+    gap = 8
+    footer_h = 110
+    canvas = np.zeros((h + footer_h, w * 3 + gap * 4, 3), dtype=np.uint8)
+    x0 = gap
+    x1 = x0 + w + gap
+    x2 = x1 + w + gap
+    canvas[:h, x0 : x0 + w] = img_rgb
+    canvas[:h, x1 : x1 + w] = mask_rgb
+    canvas[:h, x2 : x2 + w] = overlay
+
+    img = Image.fromarray(canvas, mode="RGB")
+    draw = ImageDraw.Draw(img)
+    y = h + 8
+    line1 = f"{case_id} {axis} idx={slice_idx} reason={reason}"
+    line2 = f"foreground_pixels={foreground_pixels} {threshold_name}={threshold_value}"
+    if per_class:
+        pcs = ", ".join([f"{k}:{v}" for k, v in per_class.most_common(8)])
+    else:
+        pcs = "none"
+    line3 = f"per_class_pixels: {pcs}"
+    draw.text((8, y), line1, fill=(255, 255, 255))
+    draw.text((8, y + 22), line2, fill=(255, 255, 255))
+    draw.text((8, y + 44), line3, fill=(255, 255, 255))
+    draw.text((x0, 4), "image", fill=(255, 255, 255))
+    draw.text((x1, 4), "mask", fill=(255, 255, 255))
+    draw.text((x2, 4), "overlay", fill=(255, 255, 255))
+    img.save(out_path)
 
 
 def load_task_root(synapse_root: Path, task_name: str) -> Path:
@@ -363,6 +465,32 @@ def main() -> None:
         default="",
         help="JSON listing exported imagesTs slice paths (default: <split-out>/imagesTs_inference.json)",
     )
+    parser.add_argument(
+        "--save-skipped",
+        action="store_true",
+        help="Save skipped slices for visual inspection (image + mask preview + JSON manifest)",
+    )
+    parser.add_argument(
+        "--skipped-out",
+        default="",
+        help="Output dir for skipped samples (default: <out-root>/skipped)",
+    )
+    parser.add_argument(
+        "--save-skipped-debug",
+        action="store_true",
+        help="Save composite debug panels (image/mask/overlay + text stats) for skipped slices",
+    )
+    parser.add_argument(
+        "--skipped-debug-out",
+        default="",
+        help="Output dir for skipped debug panels (default: <out-root>/skipped_debug)",
+    )
+    parser.add_argument(
+        "--overlay-alpha",
+        type=float,
+        default=0.35,
+        help="Overlay alpha for skipped debug panels",
+    )
     args = parser.parse_args()
 
     split_vals = parse_split_values(args.split)
@@ -417,6 +545,24 @@ def main() -> None:
     split_items: Dict[str, List] = {"train": [], "val": [], "test": []}
     class_counter = Counter()
     skipped_slices = 0
+    skipped_records: List[dict] = []
+
+    skipped_out_dir = None
+    if args.save_skipped:
+        skipped_out_dir = (
+            Path(args.skipped_out).expanduser().resolve()
+            if args.skipped_out
+            else out_root / "skipped"
+        )
+        skipped_out_dir.mkdir(parents=True, exist_ok=True)
+    skipped_debug_out_dir = None
+    if args.save_skipped_debug:
+        skipped_debug_out_dir = (
+            Path(args.skipped_debug_out).expanduser().resolve()
+            if args.skipped_debug_out
+            else out_root / "skipped_debug"
+        )
+        skipped_debug_out_dir.mkdir(parents=True, exist_ok=True)
 
     axis = axis_to_int(args.axis)
 
@@ -451,6 +597,47 @@ def main() -> None:
                 class_name = dominant_class_for_slice(mask2d, id_to_class, args.min_mask_pixels)
                 if class_name is None:
                     skipped_slices += 1
+                    per_class = per_class_pixel_counts(mask2d, id_to_class)
+                    max_pixels = max(per_class.values()) if per_class else 0
+                    reason = "no_mapped_foreground" if not per_class else "below_min_mask_pixels"
+                    if args.save_skipped and skipped_out_dir is not None:
+                        base = f"{case_id}_{args.axis}_{idx:04d}"
+                        img_path = skipped_out_dir / f"{base}_img.png"
+                        mask_path = skipped_out_dir / f"{base}_mask.png"
+                        Image.fromarray(img_u8, mode="L").save(img_path)
+                        mask_u8 = np.clip(mask2d.astype(np.int16), 0, 255).astype(np.uint8)
+                        Image.fromarray(mask_u8, mode="L").save(mask_path)
+                        skipped_records.append(
+                            {
+                                "case_id": case_id,
+                                "axis": args.axis,
+                                "slice_index": idx,
+                                "reason": reason,
+                                "max_class_pixels": int(max_pixels),
+                                "min_mask_pixels": int(args.min_mask_pixels),
+                                "foreground_pixels": int((mask2d > 0).sum()),
+                                "image_path": str(img_path),
+                                "mask_path": str(mask_path),
+                            }
+                        )
+                    if args.save_skipped_debug and skipped_debug_out_dir is not None:
+                        per_class = per_class_pixel_counts(mask2d, id_to_class)
+                        base = f"{case_id}_{args.axis}_{idx:04d}"
+                        dbg_path = skipped_debug_out_dir / f"{base}_debug.png"
+                        save_skipped_debug_panel(
+                            out_path=dbg_path,
+                            img_u8=img_u8,
+                            mask2d=mask2d,
+                            case_id=case_id,
+                            axis=args.axis,
+                            slice_idx=idx,
+                            reason=reason,
+                            threshold_name="min_mask_pixels",
+                            threshold_value=int(args.min_mask_pixels),
+                            foreground_pixels=int((mask2d > 0).sum()),
+                            per_class=per_class,
+                            overlay_alpha=float(args.overlay_alpha),
+                        )
                     continue
                 if args.output_format == "multiclass":
                     out_path = out_root / class_name / f"{case_id}_{args.axis}_{idx:04d}.png"
@@ -473,6 +660,47 @@ def main() -> None:
                 )
                 if not present_classes:
                     skipped_slices += 1
+                    per_class = per_class_pixel_counts(mask2d, id_to_class)
+                    max_pixels = max(per_class.values()) if per_class else 0
+                    reason = "no_mapped_foreground" if not per_class else "below_presence_min_pixels"
+                    if args.save_skipped and skipped_out_dir is not None:
+                        base = f"{case_id}_{args.axis}_{idx:04d}"
+                        img_path = skipped_out_dir / f"{base}_img.png"
+                        mask_path = skipped_out_dir / f"{base}_mask.png"
+                        Image.fromarray(img_u8, mode="L").save(img_path)
+                        mask_u8 = np.clip(mask2d.astype(np.int16), 0, 255).astype(np.uint8)
+                        Image.fromarray(mask_u8, mode="L").save(mask_path)
+                        skipped_records.append(
+                            {
+                                "case_id": case_id,
+                                "axis": args.axis,
+                                "slice_index": idx,
+                                "reason": reason,
+                                "max_class_pixels": int(max_pixels),
+                                "presence_min_pixels": int(args.presence_min_pixels),
+                                "foreground_pixels": int((mask2d > 0).sum()),
+                                "image_path": str(img_path),
+                                "mask_path": str(mask_path),
+                            }
+                        )
+                    if args.save_skipped_debug and skipped_debug_out_dir is not None:
+                        per_class = per_class_pixel_counts(mask2d, id_to_class)
+                        base = f"{case_id}_{args.axis}_{idx:04d}"
+                        dbg_path = skipped_debug_out_dir / f"{base}_debug.png"
+                        save_skipped_debug_panel(
+                            out_path=dbg_path,
+                            img_u8=img_u8,
+                            mask2d=mask2d,
+                            case_id=case_id,
+                            axis=args.axis,
+                            slice_idx=idx,
+                            reason=reason,
+                            threshold_name="presence_min_pixels",
+                            threshold_value=int(args.presence_min_pixels),
+                            foreground_pixels=int((mask2d > 0).sum()),
+                            per_class=per_class,
+                            overlay_alpha=float(args.overlay_alpha),
+                        )
                     continue
                 if args.output_format == "multiclass":
                     for class_name in present_classes:
@@ -537,6 +765,9 @@ def main() -> None:
     for split_name in ["train", "val", "test"]:
         with open(split_out / f"{split_name}.json", "w") as f:
             json.dump(split_items[split_name], f)
+    if args.save_skipped and skipped_out_dir is not None:
+        with open(split_out / "skipped_manifest.json", "w") as f:
+            json.dump(skipped_records, f, indent=2)
 
     summary = {
         "task_root": str(task_root),
@@ -559,6 +790,11 @@ def main() -> None:
         "effective_split": split_cfg,
         "images_ts_exported": bool(args.export_images_ts),
         "images_ts_slice_count": ts_export_count,
+        "save_skipped": bool(args.save_skipped),
+        "skipped_out": str(skipped_out_dir) if skipped_out_dir is not None else None,
+        "save_skipped_debug": bool(args.save_skipped_debug),
+        "skipped_debug_out": str(skipped_debug_out_dir) if skipped_debug_out_dir is not None else None,
+        "overlay_alpha": float(args.overlay_alpha),
     }
     with open(split_out / "synapse_prep_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
