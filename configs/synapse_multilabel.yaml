@@ -14,6 +14,12 @@ early_stopping:
   patience: 5
   min_delta: 0.001
 
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.5
+  patience: 2
+  min_lr: 1.0e-6
+
 augmentation:
   hflip: true
   vflip: false

@@ -249,6 +249,25 @@ def main():
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    sched_cfg = cfg.get("scheduler", {}) or {}
+    sched_name = (sched_cfg.get("name", "none") or "none").strip().lower()
+    scheduler = None
+    if sched_name == "reduce_on_plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(sched_cfg.get("factor", 0.5)),
+            patience=int(sched_cfg.get("patience", 2)),
+            min_lr=float(sched_cfg.get("min_lr", 1.0e-6)),
+        )
+    elif sched_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(sched_cfg.get("t_max", cfg["epochs"])),
+            eta_min=float(sched_cfg.get("eta_min", 1.0e-6)),
+        )
+    elif sched_name != "none":
+        raise ValueError("scheduler.name must be one of: none, reduce_on_plateau, cosine")
 
     best_val = -1.0
     es_cfg = cfg.get("early_stopping", {}) or {}
@@ -319,10 +338,17 @@ def main():
         else:
             no_improve += 1
 
+        if scheduler is not None:
+            if sched_name == "reduce_on_plateau":
+                scheduler.step(val_metric)
+            else:
+                scheduler.step()
+
         metric_name = "val_acc" if task_type == "multiclass" else "val_micro_f1"
+        current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"epoch={epoch+1} train_loss={running / max(len(train_loader),1):.4f} "
-            f"val_loss={avg_val_loss:.4f} {metric_name}={val_metric:.4f}"
+            f"val_loss={avg_val_loss:.4f} {metric_name}={val_metric:.4f} lr={current_lr:.6g}"
         )
 
         if patience > 0 and no_improve >= patience:
