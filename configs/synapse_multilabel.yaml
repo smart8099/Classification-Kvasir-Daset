@@ -9,6 +9,17 @@ num_workers: 4
 task_type: multilabel
 multilabel:
   threshold: 0.5
+  # Smooth and cap class weights to avoid extreme gradients on very rare labels.
+  pos_weight_power: 0.75
+  pos_weight_min: 1.0
+  pos_weight_max: 8.0
+
+imbalance:
+  sampler:
+    enabled: true
+    replacement: true
+    # >1.0 oversamples minority classes more aggressively.
+    exponent: 1.0
 
 early_stopping:
   patience: 5
